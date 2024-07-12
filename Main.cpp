@@ -31,6 +31,13 @@
 #include <backends/imgui_impl_win32.h>
 #include <backends/imgui_impl_vulkan.h>
 
+///////////////////////////////////////////////////////////////////////////
+
+constexpr std::uint32_t G_PreferredImageCount = 2;
+constexpr std::uint32_t G_MaxFramesInFlight = 2;
+
+///////////////////////////////////////////////////////////////////////////
+
 void InitWindow();
 void ShutdownWindow();
 
@@ -67,15 +74,14 @@ void ShutdownSwapchain();
 
 void InitImGui();
 void ShutdownImGui();
-///////////////////////////////////////////////////////////////////////////
 
 LRESULT CALLBACK WndProc(HWND Hwnd, UINT Msg, WPARAM Wparam, LPARAM Lparam);
+
+///////////////////////////////////////////////////////////////////////////
 
 HINSTANCE G_Hinstance = {};
 HWND G_Hwnd = {};
 
-constexpr std::uint32_t G_PreferredImageCount = 2;
-constexpr std::uint32_t G_MaxFramesInFlight = 2;
 std::uint32_t G_CurrentFrame = 0;
 
 vk::DispatchLoaderDynamic G_DLD = {};
@@ -133,6 +139,7 @@ std::vector<vk::Framebuffer> G_Framebuffers = {};
 vk::DescriptorPool G_ImguiDescriptorPool = {};
 ImGuiContext *G_ImGuiContext = {};
 ImFont *G_ConsolasFont = {};
+
 ////////////////////////////////////////////////////
 
 int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR szCmdLine, int nCmdShow)
