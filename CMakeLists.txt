@@ -20,6 +20,7 @@ add_executable(VkExampleBase WIN32
 
 target_include_directories(VkExampleBase PUBLIC "${Vulkan_INCLUDE_DIR}")
 target_include_directories(VkExampleBase PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/external/imgui")
+target_include_directories(VkExampleBase PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/external/tinygltf")
 target_link_libraries(VkExampleBase PUBLIC "Shcore.lib")
 
 target_compile_definitions(VkExampleBase PUBLIC APP_SOURCE_PATH="${CMAKE_CURRENT_SOURCE_DIR}")
