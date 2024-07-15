@@ -33,8 +33,18 @@
 
 ///////////////////////////////////////////////////////////////////////////
 
+using BufferTuple = std::tuple<vk::Buffer, vk::DeviceMemory>;
+using ImageTuple = std::tuple<vk::Image, vk::DeviceMemory, vk::ImageView>;
+
 constexpr std::uint32_t G_PreferredImageCount = 2;
 constexpr std::uint32_t G_MaxFramesInFlight = 2;
+
+constexpr std::uint32_t G_BufferTuple_Buffer = 0;
+constexpr std::uint32_t G_BufferTuple_DeviceMemory = 1;
+
+constexpr std::uint32_t G_ImageTuple_Image = 0;
+constexpr std::uint32_t G_ImageTuple_DeviceMemory = 1;
+constexpr std::uint32_t G_ImageTuple_ImageView = 2;
 
 ///////////////////////////////////////////////////////////////////////////
 
@@ -46,7 +56,9 @@ void ImGuiRender(vk::CommandBuffer CommandBuffer);
 
 std::uint32_t FindMemoryTypeIndex(std::uint32_t typeFilter, vk::MemoryPropertyFlags Properties);
 vk::ShaderModule CreateShader(const std::string &fileName);
-std::tuple<vk::Buffer, vk::DeviceMemory> CreateBuffer(vk::BufferUsageFlags UsageFlags, vk::DeviceSize ByteSize, void* DataPtr, bool bDeviceLocal = false);
+BufferTuple CreateBuffer(vk::BufferUsageFlags UsageFlags, vk::DeviceSize ByteSize, void* DataPtr, bool bDeviceLocal = false);
+ImageTuple CreateImage(vk::ImageUsageFlags UsageFlags, vk::ImageTiling Tiling, vk::Format Fmt, vk::SampleCountFlagBits SampleCount,
+					   std::uint32_t Width, std::uint32_t Height, vk::ImageAspectFlags AspectMask, bool bDeviceLocal = true);
 vk::CommandBuffer BeginSingleUseCommandBuffer();
 void EndSingleUseCommandBuffer(vk::CommandBuffer);
 
@@ -123,13 +135,8 @@ vk::Extent2D G_SwapchainExtent = {};
 
 vk::SwapchainKHR G_Swapchain = {};
 
-std::vector<vk::Image> G_ColorBufferImages;
-std::vector<vk::DeviceMemory> G_ColorBufferDeviceMemories;
-std::vector<vk::ImageView> G_ColorBufferImageViews;
-
-std::vector<vk::Image> G_DepthBufferImages;
-std::vector<vk::DeviceMemory> G_DepthBufferDeviceMemories;
-std::vector<vk::ImageView> G_DepthBufferImageViews;
+std::vector<ImageTuple> G_ColorTupleMS;
+std::vector<ImageTuple> G_DepthTuple;
 
 std::vector<vk::Image> G_SwapchainImages = {};
 std::vector<vk::ImageView> G_SwapchainImageViews = {};
@@ -423,7 +430,7 @@ vk::ShaderModule CreateShader(const std::string &fileName)
 	return G_Device.createShaderModule(ShaderModuleCI, nullptr, G_DLD);
 }
 
-std::tuple<vk::Buffer, vk::DeviceMemory> CreateBuffer(vk::BufferUsageFlags UsageFlags, vk::DeviceSize ByteSize, void* DataPtr, bool bDeviceLocal)
+BufferTuple CreateBuffer(vk::BufferUsageFlags UsageFlags, vk::DeviceSize ByteSize, void* DataPtr, bool bDeviceLocal)
 {
 	const vk::BufferCreateInfo BufferCI = vk::BufferCreateInfo(
 		{},
@@ -481,6 +488,67 @@ std::tuple<vk::Buffer, vk::DeviceMemory> CreateBuffer(vk::BufferUsageFlags Usage
 	}
 
 	return std::make_tuple(Buffer, BufferMemory);
+}
+
+ImageTuple CreateImage(vk::ImageUsageFlags UsageFlags,
+					   vk::ImageTiling Tiling,
+					   vk::Format Fmt,
+					   vk::SampleCountFlagBits SampleCount,
+					   std::uint32_t Width,
+					   std::uint32_t Height,
+					   vk::ImageAspectFlags AspectMask,
+					   bool bDeviceLocal)
+{
+	const vk::ImageCreateInfo ImageCI = vk::ImageCreateInfo(
+		{},
+		vk::ImageType::e2D,
+		Fmt,
+		vk::Extent3D{Width, Height, 1},
+		1,
+		1,
+		SampleCount,
+		Tiling,
+		UsageFlags,
+		vk::SharingMode::eExclusive,
+		{},
+		vk::ImageLayout::eUndefined
+		);
+
+	auto Image = G_Device.createImage(ImageCI, nullptr, G_DLD);
+	if (!Image) {
+		return {};
+	}
+
+	const vk::MemoryRequirements ImageMemReqs = G_Device.getImageMemoryRequirements(Image, G_DLD);
+	const vk::MemoryPropertyFlags MemPropFlags = bDeviceLocal ? (vk::MemoryPropertyFlagBits::eDeviceLocal) : (vk::MemoryPropertyFlagBits::eHostVisible | vk::MemoryPropertyFlagBits::eHostCoherent);
+	const std::uint32_t ImageMemoryTypeIndex = FindMemoryTypeIndex(ImageMemReqs.memoryTypeBits, MemPropFlags);
+	const vk::MemoryAllocateInfo ImageMemoryAI = vk::MemoryAllocateInfo{ImageMemReqs.size, ImageMemoryTypeIndex};
+
+	auto ImageMemory = G_Device.allocateMemory(ImageMemoryAI, nullptr, G_DLD);
+	if (!ImageMemory) {
+		G_Device.destroyImage(Image, nullptr, G_DLD);
+		return {};
+	}
+
+	G_Device.bindImageMemory(Image, ImageMemory, 0, G_DLD);
+
+	const vk::ImageViewCreateInfo ImageViewCI = vk::ImageViewCreateInfo(
+		{},
+		Image,
+		vk::ImageViewType::e2D,
+		Fmt,
+		{},
+		vk::ImageSubresourceRange{AspectMask, 0, 1, 0, 1}
+		);
+
+	auto ImageView = G_Device.createImageView(ImageViewCI, nullptr, G_DLD);
+	if (!ImageView) {
+		G_Device.freeMemory(ImageMemory, nullptr, G_DLD);
+		G_Device.destroyImage(Image, nullptr, G_DLD);
+		return {};
+	}
+
+	return std::make_tuple(Image, ImageMemory, ImageView);
 }
 
 vk::CommandBuffer BeginSingleUseCommandBuffer()
@@ -915,28 +983,28 @@ void InitRenderPass()
 
 		const std::array<vk::AttachmentDescription, 2> attachments = std::array<vk::AttachmentDescription, 2>(
 			{
-				vk::AttachmentDescription(
-					{},
-					G_SurfaceFormat.format,
-					vk::SampleCountFlagBits::e1,
-					vk::AttachmentLoadOp::eClear,
-					vk::AttachmentStoreOp::eStore,
-					vk::AttachmentLoadOp::eDontCare,
-					vk::AttachmentStoreOp::eDontCare,
-					vk::ImageLayout::eUndefined,
-					vk::ImageLayout::ePresentSrcKHR
-					),
-				vk::AttachmentDescription(
-					{},
-					G_DepthFormat,
-					vk::SampleCountFlagBits::e1,
-					vk::AttachmentLoadOp::eClear,
-					vk::AttachmentStoreOp::eDontCare,
-					vk::AttachmentLoadOp::eDontCare,
-					vk::AttachmentStoreOp::eDontCare,
-					vk::ImageLayout::eUndefined,
-					vk::ImageLayout::eDepthStencilAttachmentOptimal
-					),
+			 vk::AttachmentDescription(
+				 {},
+				 G_SurfaceFormat.format,
+				 vk::SampleCountFlagBits::e1,
+				 vk::AttachmentLoadOp::eClear,
+				 vk::AttachmentStoreOp::eStore,
+				 vk::AttachmentLoadOp::eDontCare,
+				 vk::AttachmentStoreOp::eDontCare,
+				 vk::ImageLayout::eUndefined,
+				 vk::ImageLayout::ePresentSrcKHR
+				 ),
+			 vk::AttachmentDescription(
+				 {},
+				 G_DepthFormat,
+				 vk::SampleCountFlagBits::e1,
+				 vk::AttachmentLoadOp::eClear,
+				 vk::AttachmentStoreOp::eDontCare,
+				 vk::AttachmentLoadOp::eDontCare,
+				 vk::AttachmentStoreOp::eDontCare,
+				 vk::ImageLayout::eUndefined,
+				 vk::ImageLayout::eDepthStencilAttachmentOptimal
+				 ),
 			 }
 			);
 
@@ -977,39 +1045,39 @@ void InitRenderPass()
 
 		const std::array<vk::AttachmentDescription, 3> attachments = std::array<vk::AttachmentDescription, 3>(
 			{
-			vk::AttachmentDescription(
-				{},
-				G_SurfaceFormat.format,
-				G_SampleCount,
-				vk::AttachmentLoadOp::eClear,
-				vk::AttachmentStoreOp::eDontCare,
-				vk::AttachmentLoadOp::eDontCare,
-				vk::AttachmentStoreOp::eDontCare,
-				vk::ImageLayout::eUndefined,
-				vk::ImageLayout::eColorAttachmentOptimal
-				),
-			vk::AttachmentDescription(
-				{},
-				G_SurfaceFormat.format,
-				vk::SampleCountFlagBits::e1,
-				vk::AttachmentLoadOp::eDontCare,
-				vk::AttachmentStoreOp::eStore,
-				vk::AttachmentLoadOp::eDontCare,
-				vk::AttachmentStoreOp::eDontCare,
-				vk::ImageLayout::eUndefined,
-				vk::ImageLayout::ePresentSrcKHR
-				),
-			vk::AttachmentDescription(
-				{},
-				G_DepthFormat,
-				G_SampleCount,
-				vk::AttachmentLoadOp::eClear,
-				vk::AttachmentStoreOp::eDontCare,
-				vk::AttachmentLoadOp::eDontCare,
-				vk::AttachmentStoreOp::eDontCare,
-				vk::ImageLayout::eUndefined,
-				vk::ImageLayout::eDepthStencilAttachmentOptimal
-				),
+			 vk::AttachmentDescription(
+				 {},
+				 G_SurfaceFormat.format,
+				 G_SampleCount,
+				 vk::AttachmentLoadOp::eClear,
+				 vk::AttachmentStoreOp::eDontCare,
+				 vk::AttachmentLoadOp::eDontCare,
+				 vk::AttachmentStoreOp::eDontCare,
+				 vk::ImageLayout::eUndefined,
+				 vk::ImageLayout::eColorAttachmentOptimal
+				 ),
+			 vk::AttachmentDescription(
+				 {},
+				 G_SurfaceFormat.format,
+				 vk::SampleCountFlagBits::e1,
+				 vk::AttachmentLoadOp::eDontCare,
+				 vk::AttachmentStoreOp::eStore,
+				 vk::AttachmentLoadOp::eDontCare,
+				 vk::AttachmentStoreOp::eDontCare,
+				 vk::ImageLayout::eUndefined,
+				 vk::ImageLayout::ePresentSrcKHR
+				 ),
+			 vk::AttachmentDescription(
+				 {},
+				 G_DepthFormat,
+				 G_SampleCount,
+				 vk::AttachmentLoadOp::eClear,
+				 vk::AttachmentStoreOp::eDontCare,
+				 vk::AttachmentLoadOp::eDontCare,
+				 vk::AttachmentStoreOp::eDontCare,
+				 vk::ImageLayout::eUndefined,
+				 vk::ImageLayout::eDepthStencilAttachmentOptimal
+				 ),
 			 }
 			);
 
@@ -1159,120 +1227,26 @@ void CreateSwapchain()
 	}
 
 	if (G_SampleCount != vk::SampleCountFlagBits::e1) {
-
-		G_ColorBufferImages.resize(NumImages);
-		G_ColorBufferDeviceMemories.resize(NumImages);
-		G_ColorBufferImageViews.resize(NumImages);
-		std::fill(G_ColorBufferImages.begin(), G_ColorBufferImages.end(), nullptr);
-		std::fill(G_ColorBufferDeviceMemories.begin(), G_ColorBufferDeviceMemories.end(), nullptr);
-		std::fill(G_ColorBufferImageViews.begin(), G_ColorBufferImageViews.end(), nullptr);
-
+		G_ColorTupleMS.resize(NumImages);
+		std::fill(G_ColorTupleMS.begin(), G_ColorTupleMS.end(), std::make_tuple<vk::Image, vk::DeviceMemory, vk::ImageView>({}, {}, {}));
 
 		for (std::size_t i = 0; i < NumImages; i++) {
-
-			const vk::ImageCreateInfo ImageCI = vk::ImageCreateInfo(
-				{},
-				vk::ImageType::e2D,
-				G_SurfaceFormat.format,
-				vk::Extent3D{G_SwapchainExtent.width, G_SwapchainExtent.height, 1},
-				1,
-				1,
-				G_SampleCount,
-				vk::ImageTiling::eOptimal,
-				vk::ImageUsageFlagBits::eColorAttachment,
-				vk::SharingMode::eExclusive,
-				{},
-				vk::ImageLayout::eUndefined
-				);
-
-			G_ColorBufferImages[i] = G_Device.createImage(ImageCI, nullptr, G_DLD);
-			if (!G_ColorBufferImages[i]) {
-				DestroySwapchain();
-				return;
-			}
-
-			const vk::MemoryRequirements ImageMemReqs = G_Device.getImageMemoryRequirements(G_ColorBufferImages[i], G_DLD);
-			const std::uint32_t ImageMemoryTypeIndex = FindMemoryTypeIndex(ImageMemReqs.memoryTypeBits, vk::MemoryPropertyFlagBits::eDeviceLocal);
-			const vk::MemoryAllocateInfo ImageMemoryAI = vk::MemoryAllocateInfo{ImageMemReqs.size, ImageMemoryTypeIndex};
-
-			G_ColorBufferDeviceMemories[i] = G_Device.allocateMemory(ImageMemoryAI, nullptr, G_DLD);
-			if (!G_ColorBufferDeviceMemories[i]) {
-				DestroySwapchain();
-				return;
-			}
-
-			G_Device.bindImageMemory(G_ColorBufferImages[i], G_ColorBufferDeviceMemories[i], 0, G_DLD);
-
-			const vk::ImageViewCreateInfo ImageViewCI = vk::ImageViewCreateInfo(
-				{},
-				G_ColorBufferImages[i],
-				vk::ImageViewType::e2D,
-				G_SurfaceFormat.format,
-				{},
-				vk::ImageSubresourceRange{vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1}
-				);
-
-			G_ColorBufferImageViews[i] = G_Device.createImageView(ImageViewCI, nullptr, G_DLD);
-			if (!G_ColorBufferImageViews[i]) {
+			G_ColorTupleMS[i] = CreateImage(vk::ImageUsageFlagBits::eColorAttachment, vk::ImageTiling::eOptimal, G_SurfaceFormat.format, G_SampleCount,
+											G_SwapchainExtent.width, G_SwapchainExtent.height, vk::ImageAspectFlagBits::eColor, true);
+			if (!std::get<G_ImageTuple_Image>(G_ColorTupleMS[i])) {
 				DestroySwapchain();
 				return;
 			}
 		}
 	}
 
-	G_DepthBufferImages.resize(NumImages);
-	G_DepthBufferDeviceMemories.resize(NumImages);
-	G_DepthBufferImageViews.resize(NumImages);
-	std::fill(G_DepthBufferImages.begin(), G_DepthBufferImages.end(), nullptr);
-	std::fill(G_DepthBufferDeviceMemories.begin(), G_DepthBufferDeviceMemories.end(), nullptr);
-	std::fill(G_DepthBufferImageViews.begin(), G_DepthBufferImageViews.end(), nullptr);
+	G_DepthTuple.resize(NumImages);
+	std::fill(G_DepthTuple.begin(), G_DepthTuple.end(), std::make_tuple<vk::Image, vk::DeviceMemory, vk::ImageView>({}, {}, {}));
 
 	for (std::size_t i = 0; i < NumImages; i++) {
-
-		const vk::ImageCreateInfo ImageCI = vk::ImageCreateInfo(
-			{},
-			vk::ImageType::e2D,
-			G_DepthFormat,
-			vk::Extent3D{G_SwapchainExtent.width, G_SwapchainExtent.height, 1},
-			1,
-			1,
-			G_SampleCount,
-			vk::ImageTiling::eOptimal,
-			vk::ImageUsageFlagBits::eDepthStencilAttachment,
-			vk::SharingMode::eExclusive,
-			{},
-			vk::ImageLayout::eUndefined
-			);
-
-		G_DepthBufferImages[i] = G_Device.createImage(ImageCI, nullptr, G_DLD);
-		if (!G_DepthBufferImages[i]) {
-			DestroySwapchain();
-			return;
-		}
-
-		const vk::MemoryRequirements ImageMemReqs = G_Device.getImageMemoryRequirements(G_DepthBufferImages[i], G_DLD);
-		const std::uint32_t ImageMemoryTypeIndex = FindMemoryTypeIndex(ImageMemReqs.memoryTypeBits, vk::MemoryPropertyFlagBits::eDeviceLocal);
-		const vk::MemoryAllocateInfo ImageMemoryAI = vk::MemoryAllocateInfo{ImageMemReqs.size, ImageMemoryTypeIndex};
-
-		G_DepthBufferDeviceMemories[i] = G_Device.allocateMemory(ImageMemoryAI, nullptr, G_DLD);
-		if (!G_DepthBufferDeviceMemories[i]) {
-			DestroySwapchain();
-			return;
-		}
-
-		G_Device.bindImageMemory(G_DepthBufferImages[i], G_DepthBufferDeviceMemories[i], 0, G_DLD);
-
-		const vk::ImageViewCreateInfo ImageViewCI = vk::ImageViewCreateInfo(
-			{},
-			G_DepthBufferImages[i],
-			vk::ImageViewType::e2D,
-			G_DepthFormat,
-			{},
-			vk::ImageSubresourceRange{vk::ImageAspectFlagBits::eDepth, 0, 1, 0, 1}
-			);
-
-		G_DepthBufferImageViews[i] = G_Device.createImageView(ImageViewCI, nullptr, G_DLD);
-		if (!G_DepthBufferImageViews[i]) {
+		G_DepthTuple[i] = CreateImage(vk::ImageUsageFlagBits::eDepthStencilAttachment, vk::ImageTiling::eOptimal, G_DepthFormat, G_SampleCount,
+									  G_SwapchainExtent.width, G_SwapchainExtent.height, vk::ImageAspectFlagBits::eDepth | vk::ImageAspectFlagBits::eStencil, true);
+		if (!std::get<G_ImageTuple_Image>(G_DepthTuple[i])) {
 			DestroySwapchain();
 			return;
 		}
@@ -1286,7 +1260,7 @@ void CreateSwapchain()
 		for (std::size_t i = 0; i < NumImages; ++i) {
 			const std::vector<vk::ImageView> Attachments = {
 				G_SwapchainImageViews[i],
-				G_DepthBufferImageViews[i]
+				std::get<G_ImageTuple_ImageView>(G_DepthTuple[i])
 			};
 
 			const vk::FramebufferCreateInfo FramebufferCI = vk::FramebufferCreateInfo(
@@ -1313,9 +1287,9 @@ void CreateSwapchain()
 
 		for (std::size_t i = 0; i < NumImages; ++i) {
 			const std::vector<vk::ImageView> Attachments = {
-				G_ColorBufferImageViews[i],
+				std::get<G_ImageTuple_ImageView>(G_ColorTupleMS[i]),
 				G_SwapchainImageViews[i],
-				G_DepthBufferImageViews[i]
+				std::get<G_ImageTuple_ImageView>(G_DepthTuple[i])
 			};
 
 			const vk::FramebufferCreateInfo FramebufferCI = vk::FramebufferCreateInfo(
@@ -1352,50 +1326,37 @@ void DestroySwapchain()
 			G_Framebuffers.clear();
 		}
 
-		for(auto& Item : G_DepthBufferImageViews) {
-			if (Item) {
-				G_Device.destroyImageView(Item, nullptr, G_DLD);
-				Item = nullptr;
+		for(auto& [Image, ImageMemory, ImageView] : G_DepthTuple) {
+			if (ImageView) {
+				G_Device.destroyImageView(ImageView, nullptr, G_DLD);
+				ImageView = nullptr;
 			}
-			G_DepthBufferImageViews.clear();
-		}
-		for(auto& Item : G_DepthBufferDeviceMemories) {
-			if (Item) {
-				G_Device.freeMemory(Item, nullptr, G_DLD);
-				Item = nullptr;
+			if (ImageMemory) {
+				G_Device.freeMemory(ImageMemory, nullptr, G_DLD);
+				ImageMemory = nullptr;
 			}
-			G_DepthBufferDeviceMemories.clear();
-		}
-		for(auto& Item : G_DepthBufferImages) {
-			if (Item) {
-				G_Device.destroyImage(Item, nullptr, G_DLD);
-				Item = nullptr;
+			if (Image) {
+				G_Device.destroyImage(Image, nullptr, G_DLD);
+				Image = nullptr;
 			}
-			G_DepthBufferImages.clear();
 		}
+		G_DepthTuple.clear();
 
-
-		for(auto& Item : G_ColorBufferImageViews) {
-			if (Item) {
-				G_Device.destroyImageView(Item, nullptr, G_DLD);
-				Item = nullptr;
+		for(auto& [Image, ImageMemory, ImageView] : G_ColorTupleMS) {
+			if (ImageView) {
+				G_Device.destroyImageView(ImageView, nullptr, G_DLD);
+				ImageView = nullptr;
 			}
-			G_ColorBufferImageViews.clear();
-		}
-		for(auto& Item : G_ColorBufferDeviceMemories) {
-			if (Item) {
-				G_Device.freeMemory(Item, nullptr, G_DLD);
-				Item = nullptr;
+			if (ImageMemory) {
+				G_Device.freeMemory(ImageMemory, nullptr, G_DLD);
+				ImageMemory = nullptr;
 			}
-			G_ColorBufferDeviceMemories.clear();
-		}
-		for(auto& Item : G_ColorBufferImages) {
-			if (Item) {
-				G_Device.destroyImage(Item, nullptr, G_DLD);
-				Item = nullptr;
+			if (Image) {
+				G_Device.destroyImage(Image, nullptr, G_DLD);
+				Image = nullptr;
 			}
-			G_ColorBufferImages.clear();
 		}
+		G_ColorTupleMS.clear();
 
 		for(auto& Item : G_SwapchainImageViews) {
 			if (Item) {
@@ -1498,7 +1459,6 @@ void ShutdownImGui()
 	ImGui::SetCurrentContext(nullptr);
 	G_ImGuiContext = nullptr;
 }
-
 
 
 
